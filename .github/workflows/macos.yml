@@ -1,0 +1,85 @@
+# Copyright (C) 2026 Toit contributors.
+name: Validate Toit Homebrew formula on macOS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Homebrew on ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    env:
+      HOMEBREW_NO_ANALYTICS: "1"
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_FROM_API: "1"
+      LOG_DIR: ${{ github.workspace }}/validation-logs
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Prepare Homebrew and formula
+        run: |
+          mkdir -p "$LOG_DIR"
+          brew update 2>&1 | tee "$LOG_DIR/update.log"
+          brew tap --force homebrew/core 2>&1 | tee "$LOG_DIR/tap.log"
+          core=$(brew --repository homebrew/core)
+          cp Formula/toit.rb "$core/Formula/t/toit.rb"
+          git -C "$core" add Formula/t/toit.rb
+          {
+            sw_vers
+            uname -m
+            brew config
+            git -C "$core" rev-parse HEAD
+            shasum -a 256 Formula/toit.rb
+          } 2>&1 | tee "$LOG_DIR/environment.log"
+
+      - name: Build and install from source
+        run: brew install --build-from-source --verbose toit 2>&1 | tee "$LOG_DIR/build.log"
+
+      - name: Test installed SDK
+        run: brew test toit 2>&1 | tee "$LOG_DIR/test.log"
+
+      - name: Strict audit for new formula
+        env:
+          HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
+        run: brew audit --strict --new --online toit 2>&1 | tee "$LOG_DIR/audit.log"
+
+      - name: Check formula style
+        run: brew style --formula toit 2>&1 | tee "$LOG_DIR/style.log"
+
+      - name: Check installed library linkage
+        run: brew linkage --test toit 2>&1 | tee "$LOG_DIR/linkage.log"
+
+      - name: Check stable release detection
+        env:
+          HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
+        run: brew livecheck --debug toit 2>&1 | tee "$LOG_DIR/livecheck.log"
+
+      - name: Run final Homebrew checks
+        env:
+          HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
+        run: |
+          cd "$(brew --repository homebrew/core)"
+          brew lgtm --online 2>&1 | tee "$LOG_DIR/lgtm.log"
+
+      - name: Upload validation logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: homebrew-${{ matrix.runner }}
+          path: validation-logs/
+          retention-days: 7
