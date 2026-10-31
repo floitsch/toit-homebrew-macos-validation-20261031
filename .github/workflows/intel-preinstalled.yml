@@ -1,0 +1,116 @@
+# Copyright (C) 2026 Toit contributors.
+name: Validate Toit on Intel with preinstalled build tools
+
+on:
+  push:
+    branches: [intel-preinstalled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Intel with preinstalled CMake and Ninja
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15-intel]
+    env:
+      HOMEBREW_NO_ANALYTICS: "1"
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_FROM_API: "1"
+      LOG_DIR: ${{ github.workspace }}/validation-logs
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Remove unrelated Azure CLI migration on Intel runner
+        if: matrix.runner == 'macos-15-intel'
+        run: |
+          if brew list --formula azure-cli >/dev/null 2>&1; then
+            brew uninstall --force --ignore-dependencies azure-cli
+          fi
+
+      - name: Update Homebrew
+        timeout-minutes: 10
+        run: |
+          mkdir -p "$LOG_DIR"
+          brew update 2>&1 | tee "$LOG_DIR/update.log"
+
+      - name: Prepare Homebrew core and formula
+        timeout-minutes: 10
+        run: |
+          brew tap --force homebrew/core 2>&1 | tee "$LOG_DIR/tap.log"
+          core=$(brew --repository homebrew/core)
+          cp Formula/toit.rb "$core/Formula/t/toit.rb"
+          git -C "$core" add Formula/t/toit.rb
+          {
+            sw_vers
+            uname -m
+            brew config
+            git -C "$core" rev-parse HEAD
+            shasum -a 256 Formula/toit.rb
+          } 2>&1 | tee "$LOG_DIR/environment.log"
+
+      - name: Build Toit from source with installed build tools
+        run: |
+          brew list --versions cmake ninja 2>&1 | tee "$LOG_DIR/build-tools.log"
+          cmake --version 2>&1 | tee -a "$LOG_DIR/build-tools.log"
+          ninja --version 2>&1 | tee -a "$LOG_DIR/build-tools.log"
+          brew install --build-from-source --ignore-dependencies --verbose toit 2>&1 | tee "$LOG_DIR/build.log"
+
+      - name: Verify native executable architecture
+        run: |
+          expected=$(uname -m)
+          prefix=$(brew --prefix toit)
+          {
+            for binary in "$prefix/bin/toit" "$prefix/lib/toit/bin/"* "$prefix/lib/toit/vessels/"*; do
+              file "$binary"
+              actual=$(lipo -archs "$binary")
+              if [[ "$actual" != "$expected" ]]; then
+                echo "Expected only $expected, got: $actual"
+                exit 1
+              fi
+            done
+          } 2>&1 | tee "$LOG_DIR/architecture.log"
+
+      - name: Test installed SDK
+        run: brew test toit 2>&1 | tee "$LOG_DIR/test.log"
+
+      - name: Strict audit for new formula
+        env:
+          HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
+        run: brew audit --strict --new --online toit 2>&1 | tee "$LOG_DIR/audit.log"
+
+      - name: Check formula style
+        run: brew style --formula toit 2>&1 | tee "$LOG_DIR/style.log"
+
+      - name: Check installed library linkage
+        run: brew linkage --test toit 2>&1 | tee "$LOG_DIR/linkage.log"
+
+      - name: Check stable release detection
+        env:
+          HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
+        run: brew livecheck --debug toit 2>&1 | tee "$LOG_DIR/livecheck.log"
+
+      - name: Run final Homebrew checks
+        env:
+          HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
+        run: |
+          cd "$(brew --repository homebrew/core)"
+          brew lgtm --online 2>&1 | tee "$LOG_DIR/lgtm.log"
+
+      - name: Upload validation logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: homebrew-intel-preinstalled
+          path: validation-logs/
+          retention-days: 7
