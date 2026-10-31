@@ -2,8 +2,6 @@
 name: Validate Toit Homebrew formula on macOS
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -49,6 +47,9 @@ jobs:
         run: |
           brew tap --force homebrew/core 2>&1 | tee "$LOG_DIR/tap.log"
           core=$(brew --repository homebrew/core)
+          # Remove preinstalled runner edits and update/stash conflicts.
+          git -C "$core" status --short | tee "$LOG_DIR/runner-edits.log"
+          git -C "$core" restore --source=HEAD --staged --worktree .
           cp Formula/toit.rb "$core/Formula/t/toit.rb"
           git -C "$core" add Formula/t/toit.rb
           {
