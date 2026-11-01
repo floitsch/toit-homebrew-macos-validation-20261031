@@ -15,9 +15,9 @@ class Toit < Formula
 
   uses_from_macos "zlib"
 
-  deny_network_access!
-
   patch :DATA
+
+  deny_network_access!
 
   def install
     # Toit requires its bundled Mbed TLS configuration and allocation-failure

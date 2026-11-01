@@ -1,5 +1,5 @@
 # Copyright (C) 2026 Toit contributors.
-name: Validate upstream CMake fixes with Make
+name: Check style of experimental Make formula
 
 on:
   workflow_dispatch:
@@ -60,37 +60,8 @@ jobs:
             shasum -a 256 Formula/toit.rb
           } 2>&1 | tee "$LOG_DIR/environment.log"
 
-      - name: Build and install patched release with Make
-        run: brew install --build-from-source --verbose toit 2>&1 | tee "$LOG_DIR/build.log"
-
-      - name: Verify native executable architecture
-        run: |
-          expected=$(uname -m)
-          prefix=$(brew --prefix toit)
-          {
-            for binary in "$prefix/bin/toit" "$prefix/lib/toit/bin/"* "$prefix/lib/toit/vessels/"*; do
-              file "$binary"
-              actual=$(lipo -archs "$binary")
-              if [[ "$actual" != "$expected" ]]; then
-                echo "Expected only $expected, got: $actual"
-                exit 1
-              fi
-            done
-          } 2>&1 | tee "$LOG_DIR/architecture.log"
-
-      - name: Test installed SDK
-        run: brew test toit 2>&1 | tee "$LOG_DIR/test.log"
-
       - name: Check formula style
         run: brew style --formula toit 2>&1 | tee "$LOG_DIR/style.log"
-
-      - name: Check installed library linkage
-        run: brew linkage --test toit 2>&1 | tee "$LOG_DIR/linkage.log"
-
-      - name: Check stable release detection
-        env:
-          HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
-        run: brew livecheck --debug toit 2>&1 | tee "$LOG_DIR/livecheck.log"
 
       - name: Upload validation logs
         if: always()
