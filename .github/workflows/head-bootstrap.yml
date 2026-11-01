@@ -1,0 +1,49 @@
+# Copyright (C) 2026 Toit contributors.
+name: Check HEAD bootstrap under the formula network policy
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  bootstrap:
+    runs-on: macos-15
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: toitlang/toit
+          ref: master
+          path: head-source
+          persist-credentials: false
+          submodules: false
+      - name: Test the HEAD build bootstrap command with networking denied
+        run: |
+          mkdir -p logs
+          git -C head-source rev-parse HEAD | tee logs/head-commit.log
+          test ! -d head-source/system/extensions/host/.packages-bootstrap
+          set +e
+          /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network*)' \
+            cmake \
+              -DPACKAGE_LOCK_PATH="$PWD/head-source/system/extensions/host/package.lock" \
+              -DPACKAGES_DIR="$RUNNER_TEMP/head-bootstrap-denied" \
+              -P "$PWD/head-source/tools/pkg-install.cmake" 2>&1 | tee logs/head-bootstrap-denied.log
+          result=${PIPESTATUS[0]}
+          set -e
+          echo "Offline bootstrap exit status: $result" | tee -a logs/head-bootstrap-denied.log
+          test "$result" -ne 0
+          grep -F 'Failed to clone' logs/head-bootstrap-denied.log
+      - name: Verify the same bootstrap command with network access
+        run: |
+          cmake \
+            -DPACKAGE_LOCK_PATH="$PWD/head-source/system/extensions/host/package.lock" \
+            -DPACKAGES_DIR="$RUNNER_TEMP/head-bootstrap-allowed" \
+            -P "$PWD/head-source/tools/pkg-install.cmake" 2>&1 | tee logs/head-bootstrap-allowed.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: head-bootstrap-network-policy
+          path: logs/
+          retention-days: 7
