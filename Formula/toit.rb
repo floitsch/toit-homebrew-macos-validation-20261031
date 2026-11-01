@@ -4,6 +4,7 @@ class Toit < Formula
   url "https://github.com/toitlang/toit/releases/download/v2.0.0/toit-v2.0.0-with-submodules.tar.gz"
   sha256 "9851b8230031503a737b20c75113546598ae69d89a5ea45b0a084764309a8798"
   license all_of: ["LGPL-2.1-only", "MIT"]
+  head "https://github.com/toitlang/toit.git", branch: "master"
 
   livecheck do
     url :stable

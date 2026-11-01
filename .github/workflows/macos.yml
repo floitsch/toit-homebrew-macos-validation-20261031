@@ -1,5 +1,5 @@
 # Copyright (C) 2026 Toit contributors.
-name: Validate Toit Homebrew formula on macOS
+name: Validate review suggestions and Make backend
 
 on:
   workflow_dispatch:
@@ -60,7 +60,24 @@ jobs:
             shasum -a 256 Formula/toit.rb
           } 2>&1 | tee "$LOG_DIR/environment.log"
 
-      - name: Build and install from source
+      - name: Try source build with Make and no Ninja dependency
+        id: make
+        continue-on-error: true
+        run: |
+          core=$(brew --repository homebrew/core)
+          cp Formula/toit-make.rb "$core/Formula/t/toit.rb"
+          git -C "$core" add Formula/t/toit.rb
+          brew install --build-from-source --verbose toit 2>&1 | tee "$LOG_DIR/make-build.log"
+
+      - name: Restore candidate formula after Make experiment
+        if: always()
+        run: |
+          core=$(brew --repository homebrew/core)
+          cp Formula/toit.rb "$core/Formula/t/toit.rb"
+          git -C "$core" add Formula/t/toit.rb
+
+      - name: Build and install with Ninja after failed Make experiment
+        if: steps.make.outcome == 'failure'
         run: brew install --build-from-source --verbose toit 2>&1 | tee "$LOG_DIR/build.log"
 
       - name: Verify native executable architecture
@@ -80,6 +97,28 @@ jobs:
 
       - name: Test installed SDK
         run: brew test toit 2>&1 | tee "$LOG_DIR/test.log"
+
+      - name: Test exact suggested version assertion
+        run: |
+          core=$(brew --repository homebrew/core)
+          cp "$core/Formula/t/toit.rb" "$RUNNER_TEMP/toit-before-version-test.rb"
+          trap 'cp "$RUNNER_TEMP/toit-before-version-test.rb" "$core/Formula/t/toit.rb"' EXIT
+          python3 - "$core/Formula/t/toit.rb" <<'PYTHON'
+          import pathlib, sys
+          p = pathlib.Path(sys.argv[1])
+          s = p.read_text()
+          old = 'assert_equal "v#{version}", shell_output("#{bin}/toit version").strip'
+          new = 'assert_equal version.to_s, shell_output("#{bin}/toit version")'
+          assert old in s
+          p.write_text(s.replace(old, new))
+          PYTHON
+          set +e
+          brew test toit 2>&1 | tee "$LOG_DIR/suggested-version-test.log"
+          result=${PIPESTATUS[0]}
+          set -e
+          echo "Suggested assertion exit status: $result" | tee -a "$LOG_DIR/suggested-version-test.log"
+          test "$result" -ne 0
+          grep -F 'v2.0.0' "$LOG_DIR/suggested-version-test.log"
 
       - name: Strict audit for new formula
         env:
