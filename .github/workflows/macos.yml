@@ -1,152 +1,49 @@
 # Copyright (C) 2026 Toit contributors.
-name: Validate review suggestions and Make backend
-
+name: Check HEAD bootstrap under the formula network policy
 on:
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
-  validate:
-    name: Homebrew on ${{ matrix.runner }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [macos-15, macos-15-intel]
-    env:
-      HOMEBREW_NO_ANALYTICS: "1"
-      HOMEBREW_NO_AUTO_UPDATE: "1"
-      HOMEBREW_NO_INSTALL_FROM_API: "1"
-      LOG_DIR: ${{ github.workspace }}/validation-logs
+  bootstrap:
+    runs-on: macos-15
+    timeout-minutes: 10
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          repository: toitlang/toit
+          ref: master
+          path: head-source
           persist-credentials: false
-
-      - name: Remove unrelated Azure CLI migration on Intel runner
-        if: matrix.runner == 'macos-15-intel'
+          submodules: false
+      - name: Test the HEAD build bootstrap command with networking denied
         run: |
-          if brew list --formula azure-cli >/dev/null 2>&1; then
-            brew uninstall --force --ignore-dependencies azure-cli
-          fi
-
-      - name: Update Homebrew
-        timeout-minutes: 10
-        run: |
-          mkdir -p "$LOG_DIR"
-          brew update 2>&1 | tee "$LOG_DIR/update.log"
-
-      - name: Prepare Homebrew core and formula
-        timeout-minutes: 10
-        run: |
-          brew tap --force homebrew/core 2>&1 | tee "$LOG_DIR/tap.log"
-          core=$(brew --repository homebrew/core)
-          # Remove preinstalled runner edits and update/stash conflicts.
-          git -C "$core" status --short | tee "$LOG_DIR/runner-edits.log"
-          git -C "$core" restore --source=HEAD --staged --worktree .
-          cp Formula/toit.rb "$core/Formula/t/toit.rb"
-          git -C "$core" add Formula/t/toit.rb
-          {
-            sw_vers
-            uname -m
-            brew config
-            git -C "$core" rev-parse HEAD
-            shasum -a 256 Formula/toit.rb
-          } 2>&1 | tee "$LOG_DIR/environment.log"
-
-      - name: Try source build with Make and no Ninja dependency
-        id: make
-        continue-on-error: true
-        run: |
-          core=$(brew --repository homebrew/core)
-          cp Formula/toit-make.rb "$core/Formula/t/toit.rb"
-          git -C "$core" add Formula/t/toit.rb
-          brew install --build-from-source --verbose toit 2>&1 | tee "$LOG_DIR/make-build.log"
-
-      - name: Restore candidate formula after Make experiment
-        if: always()
-        run: |
-          core=$(brew --repository homebrew/core)
-          cp Formula/toit.rb "$core/Formula/t/toit.rb"
-          git -C "$core" add Formula/t/toit.rb
-
-      - name: Build and install with Ninja after failed Make experiment
-        if: steps.make.outcome == 'failure'
-        run: brew install --build-from-source --verbose toit 2>&1 | tee "$LOG_DIR/build.log"
-
-      - name: Verify native executable architecture
-        run: |
-          expected=$(uname -m)
-          prefix=$(brew --prefix toit)
-          {
-            for binary in "$prefix/bin/toit" "$prefix/lib/toit/bin/"* "$prefix/lib/toit/vessels/"*; do
-              file "$binary"
-              actual=$(lipo -archs "$binary")
-              if [[ "$actual" != "$expected" ]]; then
-                echo "Expected only $expected, got: $actual"
-                exit 1
-              fi
-            done
-          } 2>&1 | tee "$LOG_DIR/architecture.log"
-
-      - name: Test installed SDK
-        run: brew test toit 2>&1 | tee "$LOG_DIR/test.log"
-
-      - name: Test exact suggested version assertion
-        run: |
-          core=$(brew --repository homebrew/core)
-          cp "$core/Formula/t/toit.rb" "$RUNNER_TEMP/toit-before-version-test.rb"
-          trap 'cp "$RUNNER_TEMP/toit-before-version-test.rb" "$core/Formula/t/toit.rb"' EXIT
-          python3 - "$core/Formula/t/toit.rb" <<'PYTHON'
-          import pathlib, sys
-          p = pathlib.Path(sys.argv[1])
-          s = p.read_text()
-          old = 'assert_equal "v#{version}", shell_output("#{bin}/toit version").strip'
-          new = 'assert_equal version.to_s, shell_output("#{bin}/toit version")'
-          assert old in s
-          p.write_text(s.replace(old, new))
-          PYTHON
+          mkdir -p logs
+          git -C head-source rev-parse HEAD | tee logs/head-commit.log
+          test ! -d head-source/system/extensions/host/.packages-bootstrap
           set +e
-          brew test toit 2>&1 | tee "$LOG_DIR/suggested-version-test.log"
+          /usr/bin/sandbox-exec -p '(version 1) (allow default) (deny network*)' \
+            cmake \
+              -DPACKAGE_LOCK_PATH="$PWD/head-source/system/extensions/host/package.lock" \
+              -DPACKAGES_DIR="$RUNNER_TEMP/head-bootstrap-denied" \
+              -P "$PWD/head-source/tools/pkg-install.cmake" 2>&1 | tee logs/head-bootstrap-denied.log
           result=${PIPESTATUS[0]}
           set -e
-          echo "Suggested assertion exit status: $result" | tee -a "$LOG_DIR/suggested-version-test.log"
+          echo "Offline bootstrap exit status: $result" | tee -a logs/head-bootstrap-denied.log
           test "$result" -ne 0
-          grep -F 'v2.0.0' "$LOG_DIR/suggested-version-test.log"
-
-      - name: Strict audit for new formula
-        env:
-          HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
-        run: brew audit --strict --new --online toit 2>&1 | tee "$LOG_DIR/audit.log"
-
-      - name: Check formula style
-        run: brew style --formula toit 2>&1 | tee "$LOG_DIR/style.log"
-
-      - name: Check installed library linkage
-        run: brew linkage --test toit 2>&1 | tee "$LOG_DIR/linkage.log"
-
-      - name: Check stable release detection
-        env:
-          HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
-        run: brew livecheck --debug toit 2>&1 | tee "$LOG_DIR/livecheck.log"
-
-      - name: Run final Homebrew checks
-        env:
-          HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
+          grep -F 'Failed to clone' logs/head-bootstrap-denied.log
+      - name: Verify the same bootstrap command with network access
         run: |
-          cd "$(brew --repository homebrew/core)"
-          brew lgtm --online 2>&1 | tee "$LOG_DIR/lgtm.log"
-
-      - name: Upload validation logs
+          cmake \
+            -DPACKAGE_LOCK_PATH="$PWD/head-source/system/extensions/host/package.lock" \
+            -DPACKAGES_DIR="$RUNNER_TEMP/head-bootstrap-allowed" \
+            -P "$PWD/head-source/tools/pkg-install.cmake" 2>&1 | tee logs/head-bootstrap-allowed.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: homebrew-${{ matrix.runner }}
-          path: validation-logs/
+          name: head-bootstrap-network-policy
+          path: logs/
           retention-days: 7
